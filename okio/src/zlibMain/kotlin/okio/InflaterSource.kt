@@ -20,7 +20,7 @@ package okio
 import kotlin.jvm.JvmName
 
 /**
- * A source that uses [DEFLATE](http://tools.ietf.org/html/rfc1951) to decompress data read from
+ * A source that uses [DEFLATE](https://tools.ietf.org/html/rfc1951) to decompress data read from
  * another source.
  */
 expect class InflaterSource
@@ -33,6 +33,10 @@ internal constructor(
   inflater: Inflater,
 ) : Source {
   constructor(source: Source, inflater: Inflater)
+
+  override fun read(sink: Buffer, byteCount: Long): Long
+  override fun timeout(): Timeout
+  override fun close()
 }
 
 /**

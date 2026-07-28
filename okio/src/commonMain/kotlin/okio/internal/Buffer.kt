@@ -21,7 +21,6 @@
 package okio.internal
 
 import kotlin.jvm.JvmName
-import kotlin.native.concurrent.SharedImmutable
 import okio.ArrayIndexOutOfBoundsException
 import okio.Buffer
 import okio.Buffer.UnsafeCursor
@@ -38,10 +37,8 @@ import okio.and
 import okio.asUtf8ToByteArray
 import okio.checkOffsetAndCount
 import okio.minOf
-import okio.resolveDefaultParameter
 import okio.toHexString
 
-@SharedImmutable
 internal val HEX_DIGIT_BYTES = "0123456789abcdef".asUtf8ToByteArray()
 
 // Threshold determined empirically via ReadByteStringBenchmark
@@ -461,63 +458,7 @@ internal inline fun Buffer.commonWriteDecimalLong(v: Long): Buffer {
     negative = true
   }
 
-  // Binary search for character width which favors matching lower numbers.
-  var width =
-    if (v < 100000000L) {
-      if (v < 10000L) {
-        if (v < 100L) {
-          if (v < 10L) {
-            1
-          } else {
-            2
-          }
-        } else if (v < 1000L) {
-          3
-        } else {
-          4
-        }
-      } else if (v < 1000000L) {
-        if (v < 100000L) {
-          5
-        } else {
-          6
-        }
-      } else if (v < 10000000L) {
-        7
-      } else {
-        8
-      }
-    } else if (v < 1000000000000L) {
-      if (v < 10000000000L) {
-        if (v < 1000000000L) {
-          9
-        } else {
-          10
-        }
-      } else if (v < 100000000000L) {
-        11
-      } else {
-        12
-      }
-    } else if (v < 1000000000000000L) {
-      if (v < 10000000000000L) {
-        13
-      } else if (v < 100000000000000L) {
-        14
-      } else {
-        15
-      }
-    } else if (v < 100000000000000000L) {
-      if (v < 10000000000000000L) {
-        16
-      } else {
-        17
-      }
-    } else if (v < 1000000000000000000L) {
-      18
-    } else {
-      19
-    }
+  var width = countDigitsIn(v)
   if (negative) {
     ++width
   }
@@ -539,6 +480,34 @@ internal inline fun Buffer.commonWriteDecimalLong(v: Long): Buffer {
   return this
 }
 
+private fun countDigitsIn(v: Long): Int {
+  val guess = ((64 - v.countLeadingZeroBits()) * 10) ushr 5
+  return guess + (if (v > DigitCountToLargestValue[guess]) 1 else 0)
+}
+
+private val DigitCountToLargestValue = longArrayOf(
+  -1, // Every value has more than 0 digits.
+  9L, // For 1 digit (index 1), the largest value is 9.
+  99L,
+  999L,
+  9999L,
+  99999L,
+  999999L,
+  9999999L,
+  99999999L,
+  999999999L,
+  9999999999L,
+  99999999999L,
+  999999999999L,
+  9999999999999L,
+  99999999999999L,
+  999999999999999L,
+  9999999999999999L,
+  99999999999999999L,
+  999999999999999999L, // For 18 digits (index 18), the largest value is 999999999999999999.
+  Long.MAX_VALUE, // For 19 digits (index 19), the largest value is MAX_VALUE.
+)
+
 internal inline fun Buffer.commonWriteHexadecimalUnsignedLong(v: Long): Buffer {
   var v = v
   if (v == 0L) {
@@ -547,7 +516,7 @@ internal inline fun Buffer.commonWriteHexadecimalUnsignedLong(v: Long): Buffer {
   }
 
   // Mask every bit below the most significant bit to a 1
-  // http://aggregate.org/MAGIC/#Most%20Significant%201%20Bit
+  // https://aggregate.org/MAGIC/#Most%20Significant%201%20Bit
   var x = v
   x = x or (x ushr 1)
   x = x or (x ushr 2)
@@ -557,7 +526,7 @@ internal inline fun Buffer.commonWriteHexadecimalUnsignedLong(v: Long): Buffer {
   x = x or (x ushr 32)
 
   // Count the number of 1s
-  // http://aggregate.org/MAGIC/#Population%20Count%20(Ones%20Count)
+  // https://aggregate.org/MAGIC/#Population%20Count%20(Ones%20Count)
   x -= x ushr 1 and 0x5555555555555555
   x = (x ushr 2 and 0x3333333333333333) + (x and 0x3333333333333333)
   x = (x ushr 4) + x and 0x0f0f0f0f0f0f0f0f
@@ -959,7 +928,7 @@ internal inline fun Buffer.commonReadUtf8CodePoint(): Int {
     codePoint > 0x10ffff -> {
       REPLACEMENT_CODE_POINT // Reject code points larger than the Unicode maximum.
     }
-    codePoint in 0xd800..0xdfff -> {
+    codePoint.isSurrogate -> {
       REPLACEMENT_CODE_POINT // Reject partial surrogates.
     }
     codePoint < min -> {
@@ -1014,32 +983,15 @@ internal inline fun Buffer.commonWriteUtf8(string: String, beginIndex: Int, endI
         i++
       }
 
-      c < 0xd800 || c > 0xdfff -> {
-        // Emit a 16-bit character with 3 bytes.
-        val tail = writableSegment(3)
-        /* ktlint-disable no-multi-spaces */
-        tail.data[tail.limit    ] = (c shr 12          or 0xe0).toByte() // 1110xxxx
-        tail.data[tail.limit + 1] = (c shr  6 and 0x3f or 0x80).toByte() // 10xxxxxx
-        tail.data[tail.limit + 2] = (c        and 0x3f or 0x80).toByte() // 10xxxxxx
-        /* ktlint-enable no-multi-spaces */
-        tail.limit += 3
-        size += 3L
-        i++
-      }
-
-      else -> {
-        // c is a surrogate. Make sure it is a high surrogate & that its successor is a low
-        // surrogate. If not, the UTF-16 is invalid, in which case we emit a replacement
-        // character.
+      c.isHighSurrogate -> {
+        // c is a high surrogate. Make sure its successor is a low surrogate. If not, the UTF-16 is
+        // invalid, in which case we emit a replacement character.
         val low = (if (i + 1 < endIndex) string[i + 1].code else 0)
-        if (c > 0xdbff || low !in 0xdc00..0xdfff) {
+        if (!low.isLowSurrogate) {
           writeByte('?'.code)
           i++
         } else {
-          // UTF-16 high surrogate: 110110xxxxxxxxxx (10 bits)
-          // UTF-16 low surrogate:  110111yyyyyyyyyy (10 bits)
-          // Unicode code point:    00010000000000000000 + xxxxxxxxxxyyyyyyyyyy (21 bits)
-          val codePoint = 0x010000 + (c and 0x03ff shl 10 or (low and 0x03ff))
+          val codePoint = combineSurrogates(c, low)
 
           // Emit a 21-bit character with 4 bytes.
           val tail = writableSegment(4)
@@ -1053,6 +1005,25 @@ internal inline fun Buffer.commonWriteUtf8(string: String, beginIndex: Int, endI
           size += 4L
           i += 2
         }
+      }
+
+      c.isLowSurrogate -> {
+        // Low surrogate should have followed a high surrogate. Emit a replacement character.
+        writeByte('?'.code)
+        i++
+      }
+
+      else -> {
+        // Emit a 16-bit character with 3 bytes.
+        val tail = writableSegment(3)
+        /* ktlint-disable no-multi-spaces */
+        tail.data[tail.limit    ] = (c shr 12          or 0xe0).toByte() // 1110xxxx
+        tail.data[tail.limit + 1] = (c shr  6 and 0x3f or 0x80).toByte() // 10xxxxxx
+        tail.data[tail.limit + 2] = (c        and 0x3f or 0x80).toByte() // 10xxxxxx
+        /* ktlint-enable no-multi-spaces */
+        tail.limit += 3
+        size += 3L
+        i++
       }
     }
   }
@@ -1076,7 +1047,7 @@ internal inline fun Buffer.commonWriteUtf8CodePoint(codePoint: Int): Buffer {
       tail.limit += 2
       size += 2L
     }
-    codePoint in 0xd800..0xdfff -> {
+    codePoint.isSurrogate -> {
       // Emit a replacement character for a partial surrogate.
       writeByte('?'.code)
     }
@@ -1315,10 +1286,22 @@ internal inline fun Buffer.commonIndexOf(b: Byte, fromIndex: Long, toIndex: Long
   }
 }
 
-internal inline fun Buffer.commonIndexOf(bytes: ByteString, fromIndex: Long): Long {
+internal fun Buffer.commonIndexOf(
+  bytes: ByteString,
+  fromIndex: Long,
+  toIndex: Long = Long.MAX_VALUE,
+  bytesOffset: Int = 0,
+  byteCount: Int = bytes.size,
+): Long {
+  checkOffsetAndCount(bytes.size.toLong(), bytesOffset.toLong(), byteCount.toLong())
+  require(byteCount > 0) { "byteCount == 0" }
+  require(fromIndex >= 0) { "fromIndex < 0: $fromIndex" }
+  require(fromIndex <= toIndex) { "fromIndex > toIndex: $fromIndex > $toIndex" }
+
   var fromIndex = fromIndex
-  require(bytes.size > 0) { "bytes is empty" }
-  require(fromIndex >= 0L) { "fromIndex < 0: $fromIndex" }
+  var toIndex = toIndex
+  if (toIndex > size) toIndex = size
+  if (fromIndex == toIndex) return -1L
 
   seek(fromIndex) { s, offset ->
     var s = s ?: return -1L
@@ -1327,15 +1310,17 @@ internal inline fun Buffer.commonIndexOf(bytes: ByteString, fromIndex: Long): Lo
     // Scan through the segments, searching for the lead byte. Each time that is found, delegate
     // to rangeEquals() to check for a complete match.
     val targetByteArray = bytes.internalArray()
-    val b0 = targetByteArray[0]
-    val bytesSize = bytes.size
-    val resultLimit = size - bytesSize + 1L
+    val b0 = targetByteArray[bytesOffset]
+    val resultLimit = minOf(toIndex, size - byteCount + 1L)
     while (offset < resultLimit) {
       // Scan through the current segment.
       val data = s.data
-      val segmentLimit = okio.minOf(s.limit, s.pos + resultLimit - offset).toInt()
+      val segmentLimit = minOf(s.limit, s.pos + resultLimit - offset).toInt()
       for (pos in (s.pos + fromIndex - offset).toInt() until segmentLimit) {
-        if (data[pos] == b0 && rangeEquals(s, pos + 1, targetByteArray, 1, bytesSize)) {
+        if (
+          data[pos] == b0 &&
+          rangeEquals(s, pos + 1, targetByteArray, bytesOffset + 1, byteCount)
+        ) {
           return pos - s.pos + offset
         }
       }
@@ -1414,20 +1399,18 @@ internal inline fun Buffer.commonRangeEquals(
   bytesOffset: Int,
   byteCount: Int,
 ): Boolean {
-  if (offset < 0L ||
-    bytesOffset < 0 ||
-    byteCount < 0 ||
-    size - offset < byteCount ||
-    bytes.size - bytesOffset < byteCount
-  ) {
-    return false
-  }
-  for (i in 0 until byteCount) {
-    if (this[offset + i] != bytes[bytesOffset + i]) {
-      return false
-    }
-  }
-  return true
+  if (byteCount < 0) return false
+  if (offset < 0 || offset + byteCount > size) return false
+  if (bytesOffset < 0 || bytesOffset + byteCount > bytes.size) return false
+  if (byteCount == 0) return true
+
+  return commonIndexOf(
+    bytes = bytes,
+    bytesOffset = bytesOffset,
+    byteCount = byteCount,
+    fromIndex = offset,
+    toIndex = offset + 1,
+  ) != -1L
 }
 
 internal inline fun Buffer.commonEquals(other: Any?): Boolean {
@@ -1546,7 +1529,6 @@ internal inline fun Buffer.commonSnapshot(byteCount: Int): ByteString {
 }
 
 internal fun Buffer.commonReadUnsafe(unsafeCursor: UnsafeCursor): UnsafeCursor {
-  val unsafeCursor = resolveDefaultParameter(unsafeCursor)
   check(unsafeCursor.buffer == null) { "already attached to a buffer" }
 
   unsafeCursor.buffer = this
@@ -1555,7 +1537,6 @@ internal fun Buffer.commonReadUnsafe(unsafeCursor: UnsafeCursor): UnsafeCursor {
 }
 
 internal fun Buffer.commonReadAndWriteUnsafe(unsafeCursor: UnsafeCursor): UnsafeCursor {
-  val unsafeCursor = resolveDefaultParameter(unsafeCursor)
   check(unsafeCursor.buffer == null) { "already attached to a buffer" }
 
   unsafeCursor.buffer = this
@@ -1654,7 +1635,7 @@ internal inline fun UnsafeCursor.commonResizeBuffer(newSize: Long): Long {
       val tailSize = tail!!.limit - tail.pos
       if (tailSize <= bytesToSubtract) {
         buffer.head = tail.pop()
-        okio.SegmentPool.recycle(tail)
+        SegmentPool.recycle(tail)
         bytesToSubtract -= tailSize.toLong()
       } else {
         tail.limit -= bytesToSubtract.toInt()

@@ -18,6 +18,7 @@
 package okio
 
 import java.util.zip.Deflater
+import okio.internal.EMPTY_BYTE_ARRAY
 
 actual class DeflaterSink internal actual constructor(
   private val sink: BufferedSink,
@@ -28,7 +29,7 @@ actual class DeflaterSink internal actual constructor(
   private var closed = false
 
   @Throws(IOException::class)
-  override fun write(source: Buffer, byteCount: Long) {
+  actual override fun write(source: Buffer, byteCount: Long) {
     checkOffsetAndCount(source.size, 0, byteCount)
 
     var remaining = byteCount
@@ -51,6 +52,10 @@ actual class DeflaterSink internal actual constructor(
 
       remaining -= toDeflate
     }
+
+    // Deflater still holds a reference to the most recent segment's byte array. That can cause
+    // problems in JNI, so clear it now. https://github.com/lysine-dev/okio/issues/1608
+    deflater.setInput(EMPTY_BYTE_ARRAY, 0, 0)
   }
 
   private fun deflate(syncFlush: Boolean) {
@@ -68,7 +73,11 @@ actual class DeflaterSink internal actual constructor(
         } else {
           deflater.deflate(s.data, s.limit, Segment.SIZE - s.limit)
         }
+      } catch (ise: IllegalStateException) {
+        // Java 25+ documented behavior.
+        throw IOException("Deflater already closed", ise)
       } catch (npe: NullPointerException) {
+        // Java 24 and earlier undocumented behavior.
         throw IOException("Deflater already closed", npe)
       }
 
@@ -88,7 +97,7 @@ actual class DeflaterSink internal actual constructor(
   }
 
   @Throws(IOException::class)
-  override fun flush() {
+  actual override fun flush() {
     deflate(true)
     sink.flush()
   }
@@ -99,7 +108,7 @@ actual class DeflaterSink internal actual constructor(
   }
 
   @Throws(IOException::class)
-  override fun close() {
+  actual override fun close() {
     if (closed) return
 
     // Emit deflated data to the underlying sink. If this fails, we still need
@@ -128,7 +137,7 @@ actual class DeflaterSink internal actual constructor(
     if (thrown != null) throw thrown
   }
 
-  override fun timeout(): Timeout = sink.timeout()
+  actual override fun timeout(): Timeout = sink.timeout()
 
   override fun toString() = "DeflaterSink($sink)"
 }

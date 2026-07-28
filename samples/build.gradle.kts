@@ -1,15 +1,15 @@
 plugins {
   kotlin("multiplatform")
-  application
-}
-
-application {
-  mainClass.set(System.getProperty("mainClass"))
+  id("com.gradleup.tapmoc")
 }
 
 kotlin {
   jvm {
-    withJava()
+    binaries {
+      executable {
+        mainClass.set(System.getProperty("mainClass"))
+      }
+    }
   }
   sourceSets {
     commonMain {
@@ -19,9 +19,15 @@ kotlin {
     }
     val jvmTest by getting {
       dependencies {
+        implementation(libs.test.assertk)
         implementation(libs.test.junit)
-        implementation(libs.test.assertj)
       }
     }
   }
+}
+
+tapmoc {
+  java(8)
+  kotlin(project.getVersionByName("kotlinCoreLibrariesVersion"))
+  checkDependencies()
 }

@@ -19,16 +19,13 @@
 package okio
 
 import kotlin.jvm.JvmName
-import kotlin.native.concurrent.SharedImmutable
 import okio.ByteString.Companion.encodeUtf8
 
 /** @author Alexander Y. Kleymenov */
 
-@SharedImmutable
 internal val BASE64 =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".encodeUtf8().data
 
-@SharedImmutable
 internal val BASE64_URL_SAFE =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".encodeUtf8().data
 
@@ -116,8 +113,15 @@ internal fun String.decodeBase64ToArray(): ByteArray? {
   return out.copyOf(outCount)
 }
 
-internal fun ByteArray.encodeBase64(map: ByteArray = BASE64): String {
-  val length = (size + 2) / 3 * 4
+internal fun ByteArray.encodeBase64(
+  includePadding: Boolean,
+  map: ByteArray = BASE64,
+): String {
+  val length = if (includePadding) {
+    (size + 2) / 3 * 4
+  } else {
+    (size * 4 + 2) / 3
+  }
   val out = ByteArray(length)
   var index = 0
   val end = size - size % 3
@@ -136,8 +140,10 @@ internal fun ByteArray.encodeBase64(map: ByteArray = BASE64): String {
       val b0 = this[i].toInt()
       out[index++] = map[b0 and 0xff shr 2]
       out[index++] = map[b0 and 0x03 shl 4]
-      out[index++] = '='.code.toByte()
-      out[index] = '='.code.toByte()
+      if (includePadding) {
+        out[index++] = '='.code.toByte()
+        out[index] = '='.code.toByte()
+      }
     }
     2 -> {
       val b0 = this[i++].toInt()
@@ -145,7 +151,9 @@ internal fun ByteArray.encodeBase64(map: ByteArray = BASE64): String {
       out[index++] = map[(b0 and 0xff shr 2)]
       out[index++] = map[(b0 and 0x03 shl 4) or (b1 and 0xff shr 4)]
       out[index++] = map[(b1 and 0x0f shl 2)]
-      out[index] = '='.code.toByte()
+      if (includePadding) {
+        out[index] = '='.code.toByte()
+      }
     }
   }
   return out.toUtf8String()

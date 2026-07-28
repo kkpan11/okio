@@ -16,6 +16,7 @@
 
 package okio
 
+import app.cash.burst.Burst
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -31,12 +32,8 @@ import okio.ByteString.Companion.encodeUtf8
 import okio.ByteString.Companion.toByteString
 import okio.internal.commonAsUtf8ToByteArray
 
-class ByteStringTest : AbstractByteStringTest(ByteStringFactory.BYTE_STRING)
-class SegmentedByteStringTest : AbstractByteStringTest(ByteStringFactory.SEGMENTED_BYTE_STRING)
-class ByteStringOneBytePerSegmentTest : AbstractByteStringTest(ByteStringFactory.ONE_BYTE_PER_SEGMENT)
-class OkioEncoderTest : AbstractByteStringTest(ByteStringFactory.OKIO_ENCODER)
-
-abstract class AbstractByteStringTest internal constructor(
+@Burst
+class ByteStringTest(
   private val factory: ByteStringFactory,
 ) {
   @Test fun get() {
@@ -204,6 +201,31 @@ abstract class AbstractByteStringTest internal constructor(
     assertEquals(ByteString.of(), factory.decodeHex(""))
   }
 
+  @Test fun equalsConstantTime() {
+    val byteString = factory.decodeHex("000102")
+    assertTrue(byteString.equals(byteString, constantTime = true))
+    assertTrue(byteString.equals("000102".decodeHex(), constantTime = true))
+    assertFalse(byteString.equals("800102".decodeHex(), constantTime = true))
+    assertFalse(byteString.equals("000180".decodeHex(), constantTime = true))
+    assertFalse(byteString.equals("0001".decodeHex(), constantTime = true))
+    assertFalse(byteString.equals("00010203".decodeHex(), constantTime = true))
+  }
+
+  @Test fun equalsConstantTimeEmptyTest() {
+    assertTrue(factory.decodeHex("").equals(ByteString.EMPTY, constantTime = true))
+    assertFalse(factory.decodeHex("").equals("00".decodeHex(), constantTime = true))
+  }
+
+  @Test fun equalsNotConstantTime() {
+    val byteString = factory.decodeHex("000102")
+    assertTrue(byteString.equals(byteString, constantTime = false))
+    assertTrue(byteString.equals("000102".decodeHex(), constantTime = false))
+    assertFalse(byteString.equals("800102".decodeHex(), constantTime = false))
+    assertFalse(byteString.equals("000180".decodeHex(), constantTime = false))
+    assertFalse(byteString.equals("0001".decodeHex(), constantTime = false))
+    assertFalse(byteString.equals("00010203".decodeHex(), constantTime = false))
+  }
+
   private val bronzeHorseman = "На берегу пустынных волн"
 
   @Test fun utf8() {
@@ -229,7 +251,7 @@ abstract class AbstractByteStringTest internal constructor(
   @Test fun toAsciiLowerCaseNoUppercase() {
     val s = factory.encodeUtf8("a1_+")
     assertEquals(s, s.toAsciiLowercase())
-    if (factory === ByteStringFactory.BYTE_STRING) {
+    if (factory === ByteStringFactory.BasicByteString) {
       assertSame(s, s.toAsciiLowercase())
     }
   }
@@ -282,6 +304,17 @@ abstract class AbstractByteStringTest internal constructor(
     )
   }
 
+  @Test fun encodeBase64WithoutPadding() {
+    assertEquals("", factory.encodeUtf8("").base64(includePadding = false))
+    assertEquals("AA", factory.encodeUtf8("\u0000").base64(includePadding = false))
+    assertEquals("AAA", factory.encodeUtf8("\u0000\u0000").base64(includePadding = false))
+    assertEquals("AAAA", factory.encodeUtf8("\u0000\u0000\u0000").base64(includePadding = false))
+    assertEquals(
+      "SG93IG1hbnkgbGluZXMgb2YgY29kZSBhcmUgdGhlcmU/ICdib3V0IDIgbWlsbGlvbi4",
+      factory.encodeUtf8("How many lines of code are there? 'bout 2 million.").base64(includePadding = false),
+    )
+  }
+
   @Test fun encodeBase64Url() {
     assertEquals("", factory.encodeUtf8("").base64Url())
     assertEquals("AA==", factory.encodeUtf8("\u0000").base64Url())
@@ -290,6 +323,17 @@ abstract class AbstractByteStringTest internal constructor(
     assertEquals(
       "SG93IG1hbnkgbGluZXMgb2YgY29kZSBhcmUgdGhlcmU_ICdib3V0IDIgbWlsbGlvbi4=",
       factory.encodeUtf8("How many lines of code are there? 'bout 2 million.").base64Url(),
+    )
+  }
+
+  @Test fun encodeBase64UrlWithoutPadding() {
+    assertEquals("", factory.encodeUtf8("").base64Url(includePadding = false))
+    assertEquals("AA", factory.encodeUtf8("\u0000").base64Url(includePadding = false))
+    assertEquals("AAA", factory.encodeUtf8("\u0000\u0000").base64Url(includePadding = false))
+    assertEquals("AAAA", factory.encodeUtf8("\u0000\u0000\u0000").base64Url(includePadding = false))
+    assertEquals(
+      "SG93IG1hbnkgbGluZXMgb2YgY29kZSBhcmUgdGhlcmU_ICdib3V0IDIgbWlsbGlvbi4",
+      factory.encodeUtf8("How many lines of code are there? 'bout 2 million.").base64Url(includePadding = false),
     )
   }
 
@@ -328,28 +372,6 @@ abstract class AbstractByteStringTest internal constructor(
     assertEquals("\u0000\u0000\u0000", " AA A\r\nA ".decodeBase64()!!.utf8())
     assertEquals("\u0000\u0000\u0000", "A    AAA".decodeBase64()!!.utf8())
     assertEquals("", "    ".decodeBase64()!!.utf8())
-  }
-
-  @Test fun encodeHex() {
-    assertEquals("000102", ByteString.of(0x0, 0x1, 0x2).hex())
-  }
-
-  @Test fun decodeHex() {
-    val actual = "CAFEBABE".decodeHex()
-    val expected = ByteString.of(-54, -2, -70, -66)
-    assertEquals(expected, actual)
-  }
-
-  @Test fun decodeHexOddNumberOfChars() {
-    assertFailsWith<IllegalArgumentException> {
-      "aaa".decodeHex()
-    }
-  }
-
-  @Test fun decodeHexInvalidChar() {
-    assertFailsWith<IllegalArgumentException> {
-      "a\u0000".decodeHex()
-    }
   }
 
   @Test fun toStringOnEmpty() {

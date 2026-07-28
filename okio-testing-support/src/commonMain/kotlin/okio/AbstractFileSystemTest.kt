@@ -15,7 +15,7 @@
  */
 package okio
 
-import kotlin.test.BeforeTest
+import app.cash.burst.InterceptTest
 import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -25,9 +25,11 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
+import kotlin.time.Clock
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Instant
 import okio.ByteString.Companion.encodeUtf8
 import okio.ByteString.Companion.toByteString
 import okio.Path.Companion.toPath
@@ -40,17 +42,16 @@ abstract class AbstractFileSystemTest(
   val allowClobberingEmptyDirectories: Boolean,
   val allowAtomicMoveFromFileToDirectory: Boolean,
   val allowRenameWhenTargetIsOpen: Boolean = !windowsLimitations,
+  val closeBehavior: CloseBehavior,
   temporaryDirectory: Path,
 ) {
-  val base: Path = temporaryDirectory / "${this::class.simpleName}-${randomToken(16)}"
+  @InterceptTest
+  private val baseTestDirectory = TestDirectory(fileSystem, temporaryDirectory)
+  protected val base: Path get() = baseTestDirectory.path
+
   private val isNodeJsFileSystem = fileSystem::class.simpleName?.startsWith("NodeJs") ?: false
   private val isWasiFileSystem = fileSystem::class.simpleName?.startsWith("Wasi") ?: false
   private val isWrappingJimFileSystem = this::class.simpleName?.contains("JimFileSystem") ?: false
-
-  @BeforeTest
-  fun setUp() {
-    fileSystem.createDirectories(base)
-  }
 
   @Test
   fun doesNotExistsWithInvalidPathDoesNotThrow() {
@@ -283,31 +284,33 @@ abstract class AbstractFileSystemTest(
   fun listOnRelativePathWhichIsNotDotReturnsRelativePaths() {
     if (isNodeJsFileSystem) return
 
+    val apiDir = "api".toPath()
+    val expectedFiles = listOf(
+      apiDir / "okio.api",
+      apiDir / "okio.klib.api",
+    )
+
     // Make sure there's always at least one file so our assertion is useful. We copy the first 2
     // entries of the real working directory of the JVM to validate the results on all environment.
-    if (
-      fileSystem.isFakeFileSystem ||
+    val isFakeFileSystem = fileSystem.isFakeFileSystem ||
       fileSystem is ForwardingFileSystem && fileSystem.delegate.isFakeFileSystem
-    ) {
+    if (isFakeFileSystem) {
       val workingDirectory = "/directory".toPath()
       fileSystem.createDirectory(workingDirectory)
       fileSystem.workingDirectory = workingDirectory
-      val apiDir = "api".toPath()
+    }
+    if (isFakeFileSystem || isWrappingJimFileSystem || isWasiFileSystem) {
       fileSystem.createDirectory(apiDir)
-      fileSystem.write(apiDir / "okio.api".toPath()) {
-        writeUtf8("hello, world!")
-      }
-    } else if (isWrappingJimFileSystem || isWasiFileSystem) {
-      val apiDir = "api".toPath()
-      fileSystem.createDirectory(apiDir)
-      fileSystem.write(apiDir / "okio.api".toPath()) {
-        writeUtf8("hello, world!")
+      for (path in expectedFiles) {
+        fileSystem.write(path) {
+          writeUtf8("hello, world!")
+        }
       }
     }
 
     try {
       assertEquals(
-        listOf("api".toPath() / "okio.api".toPath()),
+        expectedFiles,
         fileSystem.list("api".toPath()),
         // List some entries to help debugging.
         fileSystem.listRecursively(".".toPath()).take(5).toList().joinToString(),
@@ -334,31 +337,33 @@ abstract class AbstractFileSystemTest(
   fun listOrNullOnRelativePathWhichIsNotDotReturnsRelativePaths() {
     if (isNodeJsFileSystem) return
 
+    val apiDir = "api".toPath()
+    val expectedFiles = listOf(
+      apiDir / "okio.api",
+      apiDir / "okio.klib.api",
+    )
+
     // Make sure there's always at least one file so our assertion is useful. We copy the first 2
     // entries of the real working directory of the JVM to validate the results on all environment.
-    if (
-      fileSystem.isFakeFileSystem ||
+    val isFakeFileSystem = fileSystem.isFakeFileSystem ||
       fileSystem is ForwardingFileSystem && fileSystem.delegate.isFakeFileSystem
-    ) {
+    if (isFakeFileSystem) {
       val workingDirectory = "/directory".toPath()
       fileSystem.createDirectory(workingDirectory)
       fileSystem.workingDirectory = workingDirectory
-      val apiDir = "api".toPath()
+    }
+    if (isFakeFileSystem || isWrappingJimFileSystem) {
       fileSystem.createDirectory(apiDir)
-      fileSystem.write(apiDir / "okio.api".toPath()) {
-        writeUtf8("hello, world!")
-      }
-    } else if (isWrappingJimFileSystem) {
-      val apiDir = "api".toPath()
-      fileSystem.createDirectory(apiDir)
-      fileSystem.write(apiDir / "okio.api".toPath()) {
-        writeUtf8("hello, world!")
+      for (path in expectedFiles) {
+        fileSystem.write(path) {
+          writeUtf8("hello, world!")
+        }
       }
     }
 
     try {
       assertEquals(
-        listOf("api".toPath() / "okio.api".toPath()),
+        expectedFiles,
         fileSystem.listOrNull("api".toPath()),
         // List some entries to help debugging.
         fileSystem.listRecursively(".".toPath()).take(5).toList().joinToString(),
@@ -1470,6 +1475,27 @@ abstract class AbstractFileSystemTest(
     assertInRange(metadata.lastAccessedAt, minTime, maxTime)
   }
 
+  /** https://github.com/lysine-dev/okio/issues/1755 */
+  @Test
+  fun fileMetadataTimestampsAreDistinct() {
+    if (fileSystem.isFakeFileSystem) return
+    if (fileSystem is ForwardingFileSystem) return
+    if (isJimFileSystem()) return
+    if (!fileSystemHasGoodMetadata) return
+
+    // These timestamps are hardcoded in the following Gradle tasks:
+    //   :okio-testing-support:touchAbstractFileSystemTestFilesCreatedAt
+    //   :okio-testing-support:touchAbstractFileSystemTestFilesModifiedAt
+    val createdAt = fromIso8601String("2026-01-01T01:01:01Z")
+    val lastModifiedAt = fromIso8601String("2026-02-02T02:02:02Z")
+
+    val path = okioRoot / "okio-testing-support" / "build/AbstractFileSystemTestFiles/metadata.txt"
+    val metadata = fileSystem.metadata(path)
+    assertTrue(metadata.isRegularFile)
+    assertInRange(metadata.createdAt, createdAt, createdAt)
+    assertInRange(metadata.lastModifiedAt, lastModifiedAt, lastModifiedAt)
+  }
+
   @Test
   fun directoryMetadata() {
     val minTime = clock.now()
@@ -2553,6 +2579,110 @@ abstract class AbstractFileSystemTest(
     }
   }
 
+  @Test
+  fun readAfterFileSystemClose() {
+    val path = base / "file"
+
+    path.writeUtf8("hello, world!")
+
+    when (closeBehavior) {
+      CloseBehavior.Closes -> {
+        fileSystem.close()
+
+        assertFailsWith<IllegalStateException> {
+          fileSystem.canonicalize(path)
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.exists(path)
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.metadata(path)
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.openReadOnly(path)
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.source(path)
+        }
+      }
+
+      CloseBehavior.DoesNothing -> {
+        fileSystem.close()
+        fileSystem.canonicalize(path)
+        fileSystem.exists(path)
+        fileSystem.metadata(path)
+        fileSystem.openReadOnly(path).use {
+        }
+        fileSystem.source(path).use {
+        }
+      }
+
+      CloseBehavior.Unsupported -> {
+        assertFailsWith<UnsupportedOperationException> {
+          fileSystem.close()
+        }
+      }
+    }
+  }
+
+  @Test
+  fun writeAfterFileSystemClose() {
+    val path = base / "file"
+
+    when (closeBehavior) {
+      CloseBehavior.Closes -> {
+        fileSystem.close()
+
+        assertFailsWith<IllegalStateException> {
+          fileSystem.appendingSink(path)
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.atomicMove(path, base / "file2")
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.createDirectory(base / "directory")
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.delete(path)
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.openReadWrite(path)
+        }
+        assertFailsWith<IllegalStateException> {
+          fileSystem.sink(path)
+        }
+        if (supportsSymlink()) {
+          assertFailsWith<IllegalStateException> {
+            fileSystem.createSymlink(base / "symlink", base)
+          }
+        }
+      }
+
+      CloseBehavior.DoesNothing -> {
+        fileSystem.close()
+
+        fileSystem.appendingSink(path).use {
+        }
+        fileSystem.atomicMove(path, base / "file2")
+        fileSystem.createDirectory(base / "directory")
+        fileSystem.delete(path)
+        fileSystem.sink(path).use {
+        }
+        fileSystem.openReadWrite(path).use {
+        }
+        if (supportsSymlink()) {
+          fileSystem.createSymlink(base / "symlink", base)
+        }
+      }
+
+      CloseBehavior.Unsupported -> {
+        assertFailsWith<UnsupportedOperationException> {
+          fileSystem.close()
+        }
+      }
+    }
+  }
+
   protected fun supportsSymlink(): Boolean {
     if (fileSystem.isFakeFileSystem) return fileSystem.allowSymlinks
     if (windowsLimitations) return false
@@ -2602,7 +2732,7 @@ abstract class AbstractFileSystemTest(
    */
   private fun Instant.minFileSystemTime(): Instant {
     val paddedInstant = minus(200.milliseconds)
-    return fromEpochSeconds(paddedInstant.epochSeconds)
+    return Instant.fromEpochSeconds(paddedInstant.epochSeconds)
   }
 
   /**
@@ -2617,7 +2747,7 @@ abstract class AbstractFileSystemTest(
    */
   private fun Instant.maxFileSystemTime(): Instant {
     val paddedInstant = plus(200.milliseconds)
-    return fromEpochSeconds(paddedInstant.plus(2.seconds).epochSeconds)
+    return Instant.fromEpochSeconds(paddedInstant.plus(2.seconds).epochSeconds)
   }
 
   /**

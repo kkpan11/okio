@@ -7,7 +7,7 @@ coverage.
 
 ### Compression (Deflater, Inflater, Gzip)
 
-JVM-only.
+JVM and native platforms.
 
 
 ### Concurrency (Pipe, Timeouts, Throttler)
@@ -36,7 +36,6 @@ Okio uses the built-in implementations of these functions on the JVM.
 
 
 [kotlin_multiplatform]: https://kotlinlang.org/docs/reference/multiplatform.html
-[mingw]: http://www.mingw.org/
 [node_js]: https://nodejs.org/api/fs.html
 
 ## Gradle configuration
